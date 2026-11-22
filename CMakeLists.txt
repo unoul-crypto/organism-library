@@ -26,6 +26,7 @@ endif()
 
 add_library(colony_organism STATIC
     src/Injuries.cpp
+    src/InjuryProfile.cpp
     src/OrganismCodec.cpp
 )
 target_include_directories(colony_organism PUBLIC include)

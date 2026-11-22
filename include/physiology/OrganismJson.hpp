@@ -12,6 +12,8 @@ using Json = nlohmann::ordered_json;
 // The caller supplies the profile and chooses whether that record tracks nutrition.
 void encodeFields(Json& value, const physiology::Organism& organism, bool includeNutrition);
 physiology::Organism decodeFields(const Json& value, injury::Body body, injury::Resilience resilience, bool includeNutrition);
+// A record with an explicit profile ID must match the supplied definition.
+physiology::Organism decodeFields(const Json& value, const injury::Profile& profile, bool includeNutrition);
 
 Json encodeInjuries(const injury::State& injuries);
 injury::State decodeInjuries(const Json& value, injury::Body body, injury::Resilience resilience,

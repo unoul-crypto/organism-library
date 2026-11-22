@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <stdexcept>
 #include <string_view>
 #include <variant>
 #include <vector>
@@ -28,6 +29,13 @@ public:
     }
     template<std::size_t N>
     Anatomy(std::array<PartDefinition<Part>, N>&&) = delete;
+
+    explicit Anatomy(const std::vector<PartDefinition<Part>>& parts)
+        : begin_(parts.data()), end_(begin_) {
+        if (parts.empty()) throw std::invalid_argument("An anatomy must have at least one part.");
+        end_ += parts.size();
+    }
+    Anatomy(std::vector<PartDefinition<Part>>&&) = delete;
 
     [[nodiscard]] const PartDefinition<Part>* find(Part id) const {
         const auto part = std::find_if(begin_, end_, [id](const auto& entry) { return entry.id == id; });

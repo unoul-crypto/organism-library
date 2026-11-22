@@ -14,7 +14,8 @@ public:
           regenerationRate_(capacity * regenerationFractionPerSecond) {
         if (!std::isfinite(capacity_) || capacity_ <= 0 ||
             !std::isfinite(incapacitationVolume_) || incapacitationVolume_ <= 0 || incapacitationVolume_ >= capacity_ ||
-            !std::isfinite(regenerationRate_) || regenerationRate_ <= 0)
+            !std::isfinite(regenerationFractionPerSecond) || regenerationFractionPerSecond < 0 ||
+            !std::isfinite(regenerationRate_))
             throw std::invalid_argument("Invalid blood volume parameters.");
     }
 
@@ -33,6 +34,7 @@ public:
         if ((current_ == capacity_ && lossRate == 0) || depleted() ||
             !std::isfinite(seconds) || seconds <= 0 || !validRate(lossRate)) return;
         const double rate = lossRate > 0 ? -lossRate : regenerationRate_;
+        if (rate == 0) return;
         const double previous = current_;
         current_ = std::clamp(current_ + rate * seconds, 0.0, capacity_);
         // Snap threshold roundoff so grouping fixed ticks gives the same transitions.
@@ -48,7 +50,7 @@ public:
         if (depleted() || !validRate(lossRate)) return never;
         const double threshold = incapacitationVolume_;
         if (lossRate > 0) return (incapacitated() ? current_ : current_ - threshold) / lossRate;
-        if (current_ == capacity_) return never;
+        if (current_ == capacity_ || regenerationRate_ == 0) return never;
         return ((incapacitated() ? threshold : capacity_) - current_) / regenerationRate_;
     }
 

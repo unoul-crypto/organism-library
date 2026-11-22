@@ -1,16 +1,14 @@
 #pragma once
 
-#include "physiology/Anatomy.hpp"
+#include "physiology/InjuryProfile.hpp"
 #include "physiology/BloodVolume.hpp"
 
 #include <vector>
 
 namespace colony::injury {
 
-enum class Body { Humanoid = 0, Quadruped = 1 };
+enum class Body { Humanoid = 0, Quadruped = 1, Custom = 2 };
 enum class Resilience { Normal = 0, Robust = 1 };
-enum class Part { Leg = 0, Arm = 1, Torso = 2, Head = 3 };
-enum class Severity { Mild, Serious, Critical };
 enum class WoundKind { Impact, Open };
 
 struct Wound {
@@ -20,16 +18,16 @@ struct Wound {
     bool treated = false;
     double damage = 0;
     double openDamage = 0;
+    double untreatedRecoveryRate = .1;
+    double treatedRecoveryRate = 1;
+    double lossPerOpenDamage = .5;
     [[nodiscard]] physiology::EffectTarget<Part> target() const { return part; }
-    [[nodiscard]] double recoveryRate() const { return treated ? 1.0 : .1; }
+    [[nodiscard]] double recoveryRate() const { return treated ? treatedRecoveryRate : untreatedRecoveryRate; }
     [[nodiscard]] double recoverySeconds() const { return restRemaining/recoveryRate(); }
-    [[nodiscard]] double bloodLossRate() const { return treated ? 0 : openDamage * .5; }
+    [[nodiscard]] double bloodLossRate() const { return treated ? 0 : openDamage * lossPerOpenDamage; }
 };
 
 [[nodiscard]] double bedRestDuration(Severity severity);
-inline constexpr double seriousDamage = 12;
-inline constexpr double criticalDamage = 24;
-inline constexpr double maximumDamage = 256;
 [[nodiscard]] double severityDamage(Severity severity);
 [[nodiscard]] Severity damageSeverity(double damage);
 
@@ -45,22 +43,22 @@ public:
     static constexpr double humanoidInjuryChance = .65;
     State() : State(Body::Humanoid) {}
     explicit State(Body body, Resilience resilience = Resilience::Normal);
+    explicit State(Profile profile);
 
     [[nodiscard]] Body body() const { return body_; }
     [[nodiscard]] Resilience resilience() const { return resilience_; }
-    [[nodiscard]] const physiology::Anatomy<Part>& anatomy() const;
+    [[nodiscard]] const Profile& profile() const { return profile_; }
+    [[nodiscard]] const physiology::Anatomy<Part>& anatomy() const { return profile_.anatomy(); }
     [[nodiscard]] const std::vector<Wound>& wounds() const { return wounds_; }
     [[nodiscard]] int trauma() const { return trauma_; }
-    [[nodiscard]] double injuryChance() const { return body_==Body::Humanoid ? humanoidInjuryChance : .85; }
-    [[nodiscard]] int lethalThreshold() const { return resilience_==Resilience::Robust ? robustLethalTrauma :
-        body_==Body::Humanoid ? lethalTrauma : quadrupedLethalTrauma; }
-    [[nodiscard]] int incapacitationThreshold() const { return resilience_==Resilience::Robust ? robustIncapacitatingTrauma :
-        body_==Body::Humanoid ? incapacitatingTrauma : quadrupedIncapacitatingTrauma; }
+    [[nodiscard]] double injuryChance() const { return profile_.definition().trauma.injuryChance; }
+    [[nodiscard]] int lethalThreshold() const { return profile_.definition().trauma.lethal; }
+    [[nodiscard]] int incapacitationThreshold() const { return profile_.definition().trauma.incapacitating; }
     [[nodiscard]] bool alive() const { return trauma_ < lethalThreshold() && !blood_.depleted(); }
     [[nodiscard]] bool canWalk() const;
     [[nodiscard]] bool downed() const { return alive() && !canWalk(); }
-    [[nodiscard]] double movementMultiplier() const { return canWalk() ? multiplier(Part::Leg) : 0.0; }
-    [[nodiscard]] double armMultiplier() const { return multiplier(Part::Arm); }
+    [[nodiscard]] double movementMultiplier() const;
+    [[nodiscard]] double armMultiplier() const;
     [[nodiscard]] Part hitPart(double roll) const;
     [[nodiscard]] double bloodVolume() const { return blood_.current(); }
     [[nodiscard]] double maximumBloodVolume() const { return blood_.capacity(); }
@@ -80,10 +78,13 @@ public:
     [[nodiscard]] double nextRecoverySeconds() const;
 
 private:
-    [[nodiscard]] double multiplier(Part part) const;
+    [[nodiscard]] double multiplier(bool ProfilePart::*affected) const;
+    [[nodiscard]] Wound configuredWound(Wound wound) const;
+    [[nodiscard]] int traumaFromDamage(double damage) const;
     void refreshTrauma();
-    Body body_;
-    Resilience resilience_;
+    Body body_ = Body::Custom;
+    Resilience resilience_ = Resilience::Normal;
+    Profile profile_;
     physiology::BloodVolume blood_;
     std::vector<Wound> wounds_;
     int trauma_ = 0;

@@ -119,6 +119,107 @@ void thresholdsAndJson() {
     require(!organism_codec::decode(invalid.dump(),error),"Reject starvation outside the nutrition range");
 }
 
+constexpr auto leftWing = static_cast<Part>(10);
+constexpr auto rightWing = static_cast<Part>(11);
+constexpr auto hull = static_cast<Part>(12);
+
+ProfileDefinition gliderDefinition() {
+    ProfileDefinition definition;
+    definition.id = "glider";
+    definition.parts = {{leftWing,"Left wing",.25,true,true},{rightWing,"Right wing",.5,true},
+        {hull,"Hull",1}};
+    definition.blood = {1200,.6,.01,.75};
+    definition.trauma = {6,8,4,8,16,.9,2,std::nullopt};
+    definition.recovery = {{8,20,40},.25,2};
+    return definition;
+}
+
+void customProfile() {
+    auto definition = gliderDefinition();
+    const Profile profile(definition);
+    definition.parts.front().name = "Changed";
+    physiology::Organism glider{profile};
+    auto& state = glider.injuries;
+    require(state.anatomy().find(leftWing)->name=="Left wing" && state.anatomy().find(Part::Leg)==nullptr &&
+        state.hitPart(.24)==leftWing && state.hitPart(.25)==rightWing && state.hitPart(.5)==hull,
+        "A game-defined profile owns its anatomy and provides custom hit locations");
+    require(!state.applyDamage(Part::Leg,8) && state.applyDamage(leftWing,8,WoundKind::Open) &&
+        state.wounds()[0].severity==Severity::Serious && state.trauma()==1 && state.injuryChance()==.9 &&
+        state.movementMultiplier()==.75 && state.armMultiplier()==.75,"Use the configured severity and body part roles");
+
+    require(state.maximumBloodVolume()==1200 && state.bloodLossRate()==6 &&
+        state.nextBloodEventSeconds()==80,"Use the configured blood capacity, loss rate and collapse threshold");
+    state.advanceBlood(10);
+    state.restInBed(2);
+    require(state.bloodVolume()==1140 && state.wounds()[0].restRemaining==19.5 &&
+        state.nextRecoverySeconds()==78,"Use custom untreated wound recovery");
+    state.treat();
+    state.advanceBlood(2);
+    require(state.bloodVolume()==1164 && state.nextRecoverySeconds()==9.75 &&
+        state.wounds()[0].recoverySeconds()==9.75,"Use custom blood regeneration and recovery after treatment");
+    require(state.applyDamage(rightWing,8) && state.downed() && state.trauma()==2,
+        "Movement trauma combines on the parts chosen by the game");
+
+    physiology::Organism second{profile};
+    require(second.injuries.applyDamage(hull,48) && second.injuries.downed() &&
+        second.injuries.applyDamage(hull,16) && !second.alive(),"Use configured general trauma thresholds");
+
+    std::string error;
+    const auto json = organism_codec::encode(glider);
+    const auto result = organism_codec::decode(json,error);
+    require(result && error.empty() && organism_codec::encode(*result)==json &&
+        result->injuries.downed() && result->injuries.wounds()[0].recoverySeconds()==9.75 &&
+        result->injuries.profile().definition().id=="glider","Custom profiles and wounds survive standalone JSON");
+
+    auto fields = organism_codec::Json::object();
+    organism_codec::encodeFields(fields,glider,true);
+    require(fields.at("organismProfile")=="glider" &&
+        organism_codec::decodeFields(fields,profile,true).injuries.downed(),
+        "A game save can reference the profile chosen by the game");
+    fields.erase("organismProfile");
+    require(organism_codec::decodeFields(fields,profile,true).injuries.bloodVolume()==1164,
+        "Older embedded records can use the profile selected by the game");
+    fields["organismProfile"] = "different";
+    bool rejected = false;
+    try { organism_codec::decodeFields(fields,profile,true); }
+    catch (const std::invalid_argument&) { rejected = true; }
+    require(rejected,"Reject a saved state belonging to a different profile");
+
+    const auto builtin = State{}.profile().definition();
+    const Profile sameId(builtin);
+    organism_codec::encodeFields(fields,physiology::Organism{sameId},true);
+    require(organism_codec::decodeFields(fields,sameId,true).alive(),
+        "Use the explicitly supplied profile even if it shares a legacy ID");
+    rejected = false;
+    try { organism_codec::decodeFields(fields,Body::Humanoid,Resilience::Normal,true); }
+    catch (const std::invalid_argument&) { rejected = true; }
+    require(rejected,"Built-in decoding cannot silently substitute for an explicitly saved custom profile");
+
+    auto invalidJson = organism_codec::Json::parse(json);
+    invalidJson["profile"]["parts"][1]["id"] = static_cast<int>(leftWing);
+    require(!organism_codec::decode(invalidJson.dump(),error),"Reject duplicate body part IDs in JSON");
+    invalidJson = organism_codec::Json::parse(json);
+    invalidJson["profile"]["blood"]["capacityMl"] = 1000;
+    require(!organism_codec::decode(invalidJson.dump(),error),"Reject blood volume outside custom capacity");
+    invalidJson = organism_codec::Json::parse(json);
+    invalidJson["profile"]["trauma"]["lethal"] = 2;
+    require(!organism_codec::decode(invalidJson.dump(),error),"Reject inconsistent trauma thresholds");
+    invalidJson = organism_codec::Json::parse(json);
+    invalidJson["profile"]["recovery"]["treatedRate"] = 0;
+    require(!organism_codec::decode(invalidJson.dump(),error),"Reject invalid wound recovery settings");
+
+    definition = gliderDefinition();
+    definition.blood.regenerationFractionPerSecond = 0;
+    definition.trauma.movementTrauma.reset();
+    definition.trauma.movementWoundSeverity = Severity::Serious;
+    State slow{Profile(definition)};
+    require(slow.restoreBloodVolume(700) && slow.downed() && std::isinf(slow.nextBloodEventSeconds()),
+        "A disabled regeneration rate has no recovery deadline");
+    slow.advanceBlood(100);
+    require(slow.bloodVolume()==700 && slow.restoreBloodVolume(1200) &&
+        slow.applyDamage(rightWing,8) && slow.downed(),"Custom movement wound limits work at full blood volume");
+}
+
 } // namespace
 
 int main() {
@@ -126,6 +227,7 @@ int main() {
         anatomyAndWounds();
         nutritionForecast();
         thresholdsAndJson();
+        customProfile();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;
