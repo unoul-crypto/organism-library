@@ -1,8 +1,8 @@
 # Organism Library
 
-A C++17 simulation library for anatomy, injury, blood loss, and nutrition.
-It includes humanoid and quadruped injury profiles and a versioned JSON codec
-for saving and restoring an organism.
+A C++17 simulation library for anatomy, injury, blood loss, nutrition, and
+body-part actions. It includes configurable injury profiles, active effects,
+a versioned JSON codec, and an optional viewer.
 
 ## Build and test
 
@@ -14,6 +14,9 @@ cmake -S . -B build
 cmake --build build --config Release
 ctest --test-dir build -C Release --output-on-failure
 ```
+
+Add `-DORGANISM_BUILD_VIEWER=ON` to the configure command to build the viewer and
+its renderer-independent `organism_viewer` test.
 
 ## Use in a CMake project
 
@@ -165,11 +168,19 @@ part ID. Keep the action ID stable when changing its presentation.
 
 ## Organism viewer
 
-Set `ORGANISM_BUILD_VIEWER=ON` before adding this project with CMake and link
-`colony_organism_viewer`. The viewer uses the host's rendering and input through
-`physiology/viewer/OrganismViewer.hpp`. Implement the four `Canvas` operations,
-keep one `OrganismViewer` per open panel, and call `draw` each frame. Pass a click
-once, on release, and the wheel delta for that frame.
+The viewer is opt-in. Set `ORGANISM_BUILD_VIEWER` before adding the dependency.
+The viewer target links the simulation library.
+
+```cmake
+set(ORGANISM_BUILD_VIEWER ON)
+add_subdirectory(organism-library)
+target_link_libraries(your_target PRIVATE colony_organism_viewer)
+```
+
+Include `physiology/viewer/OrganismViewer.hpp` and implement the four `Canvas`
+operations using the host's renderer. Keep one `OrganismViewer` per open panel
+and call `draw` each frame. Pass the pointer position and panel bounds in the
+same coordinate space, a click on release, and the wheel delta for that frame.
 
 With default options, the viewer displays an Anatomy tab. Built-in humanoid and
 quadruped profiles have diagrams. Custom profiles have a selectable list. To
@@ -177,9 +188,10 @@ provide a diagram, use `Options::layers` to put part IDs in normalized rectangle
 Multiple regions can share a part ID, as in the built-in paired limb groups.
 An empty layer displays all parts in a scrollable list.
 
-Wounds appear as red slashes. `Options::effectStyles` can provide labels and
-colored markers for individual effect types. The details panel shows wounds
-and active effects for a selected part. The overview lists whole-body effects.
+Wounds appear as red slashes. Each `Options::effectStyles` entry matches an
+active effect's `typeId`. Its label appears in the details panel, and its
+optional color adds a marker to the diagram. The details panel shows wounds
+and effects affecting the selected part. The overview lists whole-body effects.
 
 Set an effect style's `geometry` to control its marker. The rectangle contains
 `x`, `y`, width, and height as fractions of the part's diagram region, or of
@@ -188,15 +200,23 @@ The optional drawing function receives the resulting screen rectangle and the
 marker's color. Use the rectangle to draw a shape that scales with the diagram.
 
 ```cpp
-options.effectStyles.push_back({
-    "strain", "Strain", viewer::Color{172, 112, 215},
-    viewer::MarkerGeometry{
-        {.15F, .20F, .35F, .25F},
-        [](viewer::Canvas& canvas, viewer::Rect box, viewer::Color color) {
-            canvas.line(box.x, box.y + box.height, box.x + box.width, box.y, 2, color);
+#include "physiology/viewer/OrganismViewer.hpp"
+
+namespace viewer = colony::physiology::viewer;
+
+viewer::Options strainViewerOptions() {
+    viewer::Options options;
+    options.effectStyles.push_back({
+        "strain", "Strain", viewer::Color{172, 112, 215},
+        viewer::MarkerGeometry{
+            {.15F, .20F, .35F, .25F},
+            [](viewer::Canvas& canvas, viewer::Rect box, viewer::Color color) {
+                canvas.line(box.x, box.y + box.height, box.x + box.width, box.y, 2, color);
+            }
         }
-    }
-});
+    });
+    return options;
+}
 ```
 
 A color alone uses the original automatic placement. Geometry without a
