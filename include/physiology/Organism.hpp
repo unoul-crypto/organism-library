@@ -23,8 +23,12 @@ struct Organism {
     bool addEffect(ActiveEffect effect);
     bool updateEffect(ActiveEffect effect);
     bool removeEffect(std::string_view id);
+    bool applyAnalgesia(std::string id,EffectTarget<injury::Part> target,double seconds,double relief);
+    [[nodiscard]] double analgesiaRemainingSeconds(injury::Part part) const;
     void advanceEffects(double seconds, const EffectTick& onTick = {});
     [[nodiscard]] double nextEffectEventSeconds() const;
+    void advanceCondition(double seconds,const EffectTick& onTick = {});
+    [[nodiscard]] double nextConditionEventSeconds() const;
 
     [[nodiscard]] double movementMultiplier() const;
     [[nodiscard]] double armMultiplier() const;

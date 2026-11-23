@@ -98,14 +98,16 @@ IDs, and parameter names use letters AвЂ“Z, digits, dots, hyphens, or unders
 ```cpp
 colony::physiology::Organism patient;
 patient.injuries.applyDamage(colony::injury::Part::Arm, 12);
-patient.addEffect({"bandage.analgesic.1", "analgesia",
-    colony::injury::Part::Arm, 30, {{"relief", .5}}});
+patient.applyAnalgesia("bandage.analgesic.1", colony::injury::Part::Arm, 30, .5);
 const double workMultiplier = patient.armMultiplier();
 ```
 
 `analgesia` is a timed effect. A `relief` of 0.5 halves the penalty on the targeted
 parts. The strongest overlapping dose applies to each part. Physical
 incapacitation still prevents movement.
+`applyAnalgesia` starts or refreshes a timed dose by ID.
+`analgesiaRemainingSeconds(part)` reports the longest remaining dose affecting
+that part, or zero when there is no dose.
 
 Use `addEffect`, `updateEffect`, and `removeEffect` to manage the list.
 A missing duration makes a generic effect persistent. Call `advanceEffects`
@@ -114,8 +116,49 @@ horizon when splitting simulation steps at expiry. An optional tick handler
 receives the effect state at the start of the step and the time it was active.
 The timers reach the end of the step before handlers run. Changes made by a
 handler take effect on the next step.
+Call `advanceCondition` to advance blood volume and effects in the same step.
+`nextConditionEventSeconds` returns the earlier of their event deadlines.
 
 Format 4 stores effect identity, type, scope, parameters, and remaining time.
 World records embed the same effect list when it is present. Existing saves
 load with an empty list. Game-defined effect types retain their data across
 JSON round trips and can provide their behavior through the tick handler.
+
+## Body actions
+
+A `BodyActionCatalog` holds operations defined by the application. Each
+definition has a unique string ID, an operation, and an optional eligibility
+check. The catalog checks that the organism is alive and the selected part
+exists in its profile. A custom profile can supply its own part IDs.
+
+```cpp
+#include "physiology/BodyActions.hpp"
+
+using namespace colony::physiology;
+using colony::injury::Part;
+
+int main() {
+    const BodyActionCatalog actions({
+        {"relieve",
+            [](Organism& organism, Part part) {
+                return organism.applyAnalgesia("local.relief", part, 30, .5);
+            },
+            [](const Organism& organism, Part part) {
+                return organism.injuries.hasWound(part);
+            }},
+    });
+    const BodyActionTarget target{"relieve", Part::Arm};
+    Organism patient;
+    patient.injuries.applyDamage(Part::Arm, 12);
+    return actions.apply(patient, target) ? 0 : 1;
+}
+```
+
+`canApply` checks eligibility. `apply` checks it again and commits the result
+only if the operation succeeds. To coordinate an inventory change or other
+application state, call `prepare` and adopt the returned organism after that
+change succeeds. Operations should mutate only the supplied organism.
+
+`encodeBodyActionTarget` and `decodeBodyActionTarget` in
+`physiology/OrganismJson.hpp` let applications save pending jobs by action and
+part ID. Keep the action ID stable when changing its presentation.

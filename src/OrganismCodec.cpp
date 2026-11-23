@@ -234,6 +234,17 @@ physiology::Organism decodeCurrent(const Json& value) {
 }
 }
 
+Json encodeBodyActionTarget(const physiology::BodyActionTarget& target) {
+    return Json{{"id",target.id},{"part",static_cast<int>(target.part)}};
+}
+
+physiology::BodyActionTarget decodeBodyActionTarget(const Json& value,const physiology::BodyActionCatalog& catalog) {
+    auto id = value.at("id").get<std::string>();
+    const int part = intValue(value.at("part"));
+    require(catalog.find(id) && part >= 0,"Invalid body action target.");
+    return {std::move(id),static_cast<injury::Part>(part)};
+}
+
 Json encodeInjuries(const injury::State& injuries) {
     auto result = Json::array();
     for (const auto& wound : injuries.wounds())

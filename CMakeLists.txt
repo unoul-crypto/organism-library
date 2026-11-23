@@ -25,6 +25,7 @@ if(NOT TARGET nlohmann_json::nlohmann_json)
 endif()
 
 add_library(colony_organism STATIC
+    src/BodyActions.cpp
     src/Effects.cpp
     src/Injuries.cpp
     src/InjuryProfile.cpp

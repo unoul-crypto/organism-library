@@ -243,6 +243,10 @@ double State::nextRecoverySeconds() const {
     return next;
 }
 
+bool State::hasWound(Part part) const {
+    return std::any_of(wounds_.begin(),wounds_.end(),[part](const auto& wound) { return wound.part == part; });
+}
+
 bool State::needsTreatment() const {
     return alive() && std::any_of(wounds_.begin(),wounds_.end(),[](const Wound& wound) { return !wound.treated; });
 }

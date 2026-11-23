@@ -1,4 +1,5 @@
 #include "physiology/Organism.hpp"
+#include "StableIds.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -7,13 +8,6 @@
 
 namespace colony::physiology {
 namespace {
-
-bool validId(std::string_view id) {
-    return !id.empty() && std::all_of(id.begin(),id.end(),[](char c) {
-        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-            (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.';
-    });
-}
 
 double relief(const ActiveEffect& effect) {
     const auto entry = effect.parameters.find("relief");
@@ -42,12 +36,12 @@ const ActiveEffect* Organism::findEffect(std::string_view id) const {
 }
 
 bool Organism::validEffect(const ActiveEffect& effect) const {
-    if (!validId(effect.id) || !validId(effect.typeId) || effect.target.valueless_by_exception() ||
+    if (!detail::validId(effect.id) || !detail::validId(effect.typeId) || effect.target.valueless_by_exception() ||
         !injuries.anatomy().supports(effect.target) ||
         (effect.remainingSeconds && (!std::isfinite(*effect.remainingSeconds) || *effect.remainingSeconds <= 0)))
         return false;
     for (const auto& entry : effect.parameters) {
-        if (!validId(entry.first) || entry.second.valueless_by_exception()) return false;
+        if (!detail::validId(entry.first) || entry.second.valueless_by_exception()) return false;
         const auto* value = std::get_if<double>(&entry.second);
         if (value && !std::isfinite(*value)) return false;
     }
@@ -78,6 +72,21 @@ bool Organism::removeEffect(std::string_view id) {
     return true;
 }
 
+bool Organism::applyAnalgesia(std::string id,EffectTarget<injury::Part> target,double seconds,double amount) {
+    ActiveEffect effect{std::move(id),std::string(analgesiaEffectType),std::move(target),seconds,{{"relief",amount}}};
+    return findEffect(effect.id) ? updateEffect(std::move(effect)) : addEffect(std::move(effect));
+}
+
+double Organism::analgesiaRemainingSeconds(injury::Part part) const {
+    if (!injuries.anatomy().find(part)) return 0;
+    double remaining = 0;
+    for (const auto& effect : effects_) {
+        if (effect.typeId == analgesiaEffectType && effect.affects(part))
+            remaining = std::max(remaining,effect.remainingSeconds.value_or(0));
+    }
+    return remaining;
+}
+
 void Organism::advanceEffects(double seconds, const EffectTick& onTick) {
     if (!std::isfinite(seconds) || seconds <= 0 || effects_.empty()) return;
     // The snapshot lets a handler add, remove or change effects for the next step.
@@ -100,6 +109,15 @@ double Organism::nextEffectEventSeconds() const {
     for (const auto& effect : effects_)
         if (effect.remainingSeconds) next = std::min(next,*effect.remainingSeconds);
     return next;
+}
+
+void Organism::advanceCondition(double seconds,const EffectTick& onTick) {
+    injuries.advanceBlood(seconds);
+    advanceEffects(seconds,onTick);
+}
+
+double Organism::nextConditionEventSeconds() const {
+    return std::min(injuries.nextBloodEventSeconds(),nextEffectEventSeconds());
 }
 
 double Organism::injuryMultiplier(bool injury::ProfilePart::*affected) const {

@@ -58,6 +58,7 @@ public:
     [[nodiscard]] const Profile& profile() const { return profile_; }
     [[nodiscard]] const physiology::Anatomy<Part>& anatomy() const { return profile_.anatomy(); }
     [[nodiscard]] const std::vector<Wound>& wounds() const { return wounds_; }
+    [[nodiscard]] bool hasWound(Part part) const;
     [[nodiscard]] int trauma() const { return trauma_; }
     [[nodiscard]] double injuryChance() const { return profile_.definition().trauma.injuryChance; }
     [[nodiscard]] int lethalThreshold() const { return profile_.definition().trauma.lethal; }

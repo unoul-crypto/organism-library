@@ -327,6 +327,56 @@ void effectJson() {
     require(!organism_codec::decode(invalid.dump(),error),"Reject unknown built-in profile IDs");
 }
 
+void bodyActions() {
+    using namespace physiology;
+    const auto woundPresent = [](const Organism& organism,Part part) { return organism.injuries.hasWound(part); };
+    const BodyActionDefinition easePain{"relieve",
+        [](Organism& organism,Part part) { return organism.applyAnalgesia("relief.wing",part,4,.5); },woundPresent};
+    const BodyActionCatalog catalog({
+        easePain,
+        {"mark",[](Organism& organism,Part part) { return organism.addEffect({"marked","custom.mark",part,1,{}}); },{}},
+        {"failure",[](Organism& organism,Part) { organism.injuries.restoreBloodVolume(0); return false; },{}},
+    });
+    const Profile profile(gliderDefinition());
+    Organism patient{profile};
+    const BodyActionTarget target{"relieve",leftWing};
+    require(!catalog.canApply(patient,target) && !catalog.canApply(patient,"mark",Part::Arm) &&
+        !catalog.canApply(patient,"unregistered",leftWing),"Validate anatomy, eligibility and the action ID");
+    require(catalog.apply(patient,{"mark",rightWing}) && patient.findEffect("marked")->affects(rightWing),
+        "An independent action can target a healthy part without an eligibility rule");
+    require(patient.injuries.applyDamage(leftWing,8,WoundKind::Open) && catalog.canApply(patient,target),
+        "An eligible action can target a wounded custom part");
+    const auto prepared = catalog.prepare(patient,target);
+    require(prepared && !patient.findEffect("relief.wing") && prepared->analgesiaRemainingSeconds(leftWing)==4 &&
+        prepared->analgesiaRemainingSeconds(rightWing)==0,"Prepare a localized result without changing the patient");
+    require(!catalog.apply(patient,{"failure",leftWing}) && patient.injuries.bloodVolume()==1200,
+        "A rejected action leaves the original organism unchanged");
+    require(catalog.apply(patient,target) && patient.nextConditionEventSeconds()==1,"Forecast timed and physiological events");
+    patient.advanceCondition(1);
+    require(!patient.findEffect("marked") && patient.analgesiaRemainingSeconds(leftWing)==3 &&
+        patient.injuries.bloodVolume()<1200,"Advance blood loss and effect timers together");
+    require(catalog.apply(patient,target) && patient.effects().size()==1 &&
+        patient.analgesiaRemainingSeconds(leftWing)==4,"Refreshing a dose preserves its identity");
+    patient.injuries.restInBed(10000);
+    require(!catalog.prepare(patient,target) && patient.analgesiaRemainingSeconds(leftWing)==4,
+        "Recheck eligibility when preparing an action");
+    require(patient.injuries.restoreBloodVolume(0) && !catalog.apply(patient,{"mark",leftWing}),
+        "Dead organisms cannot receive body actions");
+
+    auto json = organism_codec::encodeBodyActionTarget(target);
+    require(json.at("id")=="relieve" && json.at("part")==static_cast<int>(leftWing) &&
+        organism_codec::decodeBodyActionTarget(json,catalog)==target,"Round-trip stable action and custom part IDs");
+    json["id"]="missing";
+    bool rejected = false;
+    try { organism_codec::decodeBodyActionTarget(json,catalog); }
+    catch (const std::invalid_argument&) { rejected = true; }
+    require(rejected,"Reject an unknown action in saved work");
+    rejected = false;
+    try { const BodyActionCatalog duplicate({easePain,easePain}); }
+    catch (const std::invalid_argument&) { rejected = true; }
+    require(rejected,"Reject duplicate stable action IDs");
+}
+
 } // namespace
 
 int main() {
@@ -337,6 +387,7 @@ int main() {
         customProfile();
         activeEffects();
         effectJson();
+        bodyActions();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;
