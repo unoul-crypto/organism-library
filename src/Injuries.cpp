@@ -71,6 +71,22 @@ int addTrauma(int first, int second) {
 }
 }
 
+std::optional<BuiltinProfile> findBuiltinProfile(std::string_view id) {
+    for (const auto body : {Body::Humanoid,Body::Quadruped}) {
+        for (const auto resilience : {Resilience::Normal,Resilience::Robust}) {
+            if (builtinProfile(body,resilience).definition().id == id)
+                return BuiltinProfile{body,resilience};
+        }
+    }
+    return std::nullopt;
+}
+
+double Wound::impairmentMultiplier() const {
+    constexpr std::array speed{0.90,0.75,0.60};
+    const auto index = severityIndex(severity);
+    return index < speed.size() ? speed[index] : 1;
+}
+
 State::State(Body body, Resilience resilience) : State(builtinProfile(body,resilience)) {
     body_ = body;
     resilience_ = resilience;
@@ -243,10 +259,9 @@ void State::treat() {
 }
 
 double State::multiplier(bool ProfilePart::*affected) const {
-    constexpr std::array speed{0.90,0.75,0.60};
     double result = 1.0;
     for (const auto& wound : wounds_)
-        if (profile_.part(wound.part)->*affected) result = std::min(result,speed[severityIndex(wound.severity)]);
+        if (profile_.part(wound.part)->*affected) result = std::min(result,wound.impairmentMultiplier());
     return result;
 }
 

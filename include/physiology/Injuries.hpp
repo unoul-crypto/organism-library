@@ -11,6 +11,13 @@ enum class Body { Humanoid = 0, Quadruped = 1, Custom = 2 };
 enum class Resilience { Normal = 0, Robust = 1 };
 enum class WoundKind { Impact, Open };
 
+struct BuiltinProfile {
+    Body body;
+    Resilience resilience;
+};
+
+[[nodiscard]] std::optional<BuiltinProfile> findBuiltinProfile(std::string_view id);
+
 struct Wound {
     Part part;
     Severity severity;
@@ -25,6 +32,7 @@ struct Wound {
     [[nodiscard]] double recoveryRate() const { return treated ? treatedRecoveryRate : untreatedRecoveryRate; }
     [[nodiscard]] double recoverySeconds() const { return restRemaining/recoveryRate(); }
     [[nodiscard]] double bloodLossRate() const { return treated ? 0 : openDamage * lossPerOpenDamage; }
+    [[nodiscard]] double impairmentMultiplier() const;
 };
 
 [[nodiscard]] double bedRestDuration(Severity severity);

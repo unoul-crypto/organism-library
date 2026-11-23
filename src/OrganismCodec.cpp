@@ -127,6 +127,74 @@ void restoreInjuries(injury::State& result, const Json& value, bool allowMissing
     }
 }
 
+Json encodeEffectTarget(const physiology::EffectTarget<injury::Part>& target) {
+    if (std::holds_alternative<physiology::WholeBody>(target)) return Json{{"scope","body"}};
+    if (const auto* part = std::get_if<injury::Part>(&target))
+        return Json{{"scope","part"},{"part",static_cast<int>(*part)}};
+
+    auto parts = Json::array();
+    for (const auto part : std::get<std::vector<injury::Part>>(target))
+        parts.push_back(static_cast<int>(part));
+    return Json{{"scope","parts"},{"parts",std::move(parts)}};
+}
+
+physiology::EffectTarget<injury::Part> decodeEffectTarget(const Json& value) {
+    const auto scope = value.at("scope").get<std::string>();
+    if (scope == "body") return physiology::WholeBody{};
+    if (scope == "part") return static_cast<injury::Part>(intValue(value.at("part")));
+    require(scope == "parts","Unknown effect target scope.");
+    const auto& savedParts = value.at("parts");
+    require(savedParts.is_array(),"Expected a list of target parts.");
+    std::vector<injury::Part> parts;
+    parts.reserve(savedParts.size());
+    for (const auto& part : savedParts) parts.push_back(static_cast<injury::Part>(intValue(part)));
+    return parts;
+}
+
+physiology::EffectParameter decodeEffectParameter(const Json& value) {
+    if (value.is_boolean()) return value.get<bool>();
+    if (value.is_number_integer()) {
+        if (value.is_number_unsigned())
+            require(value.get<std::uint64_t>() <= static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()),
+                "Effect integer parameter is out of range.");
+        return value.get<std::int64_t>();
+    }
+    if (value.is_number_float()) return number(value);
+    if (value.is_string()) return value.get<std::string>();
+    throw std::invalid_argument("Invalid effect parameter.");
+}
+
+Json encodeEffects(const physiology::Organism& organism) {
+    auto result = Json::array();
+    for (const auto& effect : organism.effects()) {
+        require(organism.injuries.anatomy().supports(effect.target),"Invalid saved effect target.");
+        auto parameters = Json::object();
+        for (const auto& entry : effect.parameters)
+            parameters[entry.first] = std::visit([](const auto& value) -> Json { return value; },entry.second);
+        result.push_back({{"id",effect.id},{"type",effect.typeId},{"target",encodeEffectTarget(effect.target)},
+            {"remainingSeconds",effect.remainingSeconds ? Json(*effect.remainingSeconds) : Json(nullptr)},
+            {"parameters",std::move(parameters)}});
+    }
+    return result;
+}
+
+void restoreEffects(physiology::Organism& organism, const Json& value) {
+    require(value.is_array(),"Expected an array of active effects.");
+    for (const auto& entry : value) {
+        physiology::ActiveEffect effect;
+        effect.id = entry.at("id").get<std::string>();
+        effect.typeId = entry.at("type").get<std::string>();
+        effect.target = decodeEffectTarget(entry.at("target"));
+        const auto& remaining = entry.at("remainingSeconds");
+        if (!remaining.is_null()) effect.remainingSeconds = number(remaining);
+        const auto& parameters = entry.at("parameters");
+        require(parameters.is_object(),"Expected an object of effect parameters.");
+        for (auto it = parameters.begin(); it != parameters.end(); ++it)
+            effect.parameters.emplace(it.key(),decodeEffectParameter(it.value()));
+        require(organism.addEffect(std::move(effect)),"Invalid or duplicate active effect.");
+    }
+}
+
 void writeStateFields(Json& value, const physiology::Organism& organism, bool includeNutrition) {
     value["injuries"] = encodeInjuries(organism.injuries);
     value["bloodVolumeMl"] = organism.injuries.bloodVolume();
@@ -140,6 +208,7 @@ physiology::Organism readStateFields(const Json& value, physiology::Organism res
     restoreInjuries(result.injuries,value.at("injuries"),false);
     require(result.injuries.restoreBloodVolume(number(value.at("bloodVolumeMl"))),"Invalid blood volume.");
     if (includeNutrition) result.nutrition = decodeNutrition(value);
+    if (value.contains("effects")) restoreEffects(result,value.at("effects"));
     return result;
 }
 
@@ -149,6 +218,19 @@ physiology::Organism decodeLegacy(const Json& value, bool includeNutrition) {
     require(body==injury::Body::Humanoid || body==injury::Body::Quadruped,"Invalid body type.");
     require(resilience==injury::Resilience::Normal || resilience==injury::Resilience::Robust,"Invalid resilience.");
     return decodeFields(value,body,resilience,includeNutrition);
+}
+
+physiology::Organism decodeCurrent(const Json& value) {
+    const auto id = value.at("profileId").get<std::string>();
+    require(value.at("effects").is_array(),"Expected an array of active effects.");
+    if (value.contains("profile")) {
+        const auto profile = decodeProfile(value.at("profile"));
+        require(profile.definition().id == id,"Wrong organism profile.");
+        return decodeFields(value,profile,true);
+    }
+    const auto builtin = injury::findBuiltinProfile(id);
+    require(builtin.has_value(),"Unknown built-in organism profile.");
+    return decodeFields(value,builtin->body,builtin->resilience,true);
 }
 }
 
@@ -173,6 +255,8 @@ void encodeFields(Json& value, const physiology::Organism& organism, bool includ
     if (organism.injuries.body() == injury::Body::Custom)
         value["organismProfile"] = organism.injuries.profile().definition().id;
     else value.erase("organismProfile");
+    if (organism.effects().empty()) value.erase("effects");
+    else value["effects"] = encodeEffects(organism);
 }
 
 physiology::Organism decodeFields(const Json& value, injury::Body body, injury::Resilience resilience,
@@ -186,12 +270,11 @@ physiology::Organism decodeFields(const Json& value, const injury::Profile& prof
 
 std::string encode(const physiology::Organism& organism) {
     const auto& injuries = organism.injuries;
-    Json value;
+    Json value{{"formatVersion",4},{"profileId",injuries.profile().definition().id}};
     if (injuries.body() == injury::Body::Custom)
-        value = Json{{"formatVersion",3},{"profile",encodeProfile(injuries.profile().definition())}};
-    else value = Json{{"formatVersion",2},{"body",static_cast<int>(injuries.body())},
-        {"resilience",static_cast<int>(injuries.resilience())}};
+        value["profile"] = encodeProfile(injuries.profile().definition());
     writeStateFields(value,organism,true);
+    value["effects"] = encodeEffects(organism);
     return value.dump();
 }
 
@@ -199,8 +282,9 @@ std::optional<physiology::Organism> decode(std::string_view json, std::string& e
     try {
         const auto value = Json::parse(json);
         const int version = intValue(value.at("formatVersion"));
-        require(version >= 1 && version <= 3,"Unsupported organism format.");
-        auto result = version == 3 ? decodeFields(value,decodeProfile(value.at("profile")),true) :
+        require(version >= 1 && version <= 4,"Unsupported organism format.");
+        auto result = version == 4 ? decodeCurrent(value) :
+            version == 3 ? decodeFields(value,decodeProfile(value.at("profile")),true) :
             decodeLegacy(value,version == 2);
         error.clear();
         return result;

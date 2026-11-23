@@ -11,7 +11,7 @@
 namespace colony::injury {
 
 enum class Part : int { Leg = 0, Arm = 1, Torso = 2, Head = 3 };
-enum class Severity { Mild, Serious, Critical };
+enum class Severity { Mild = 0, Serious = 1, Critical = 2 };
 
 inline constexpr double seriousDamage = 12;
 inline constexpr double criticalDamage = 24;

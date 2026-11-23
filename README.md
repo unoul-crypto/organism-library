@@ -79,10 +79,43 @@ damage threshold in a wound contributes one trauma point. Recovery parameters
 set bed rest work for each wound severity and its rates before and after
 treatment.
 
-Standalone JSON stores custom profiles with their definitions in format 3.
-Built-in profiles keep the existing format 2 representation, and the codec
-reads formats 1 and 2. For a world save, `encodeFields` writes the custom profile
+Standalone JSON format 4 uses a stable string `profileId` for built-in and
+custom profiles. It embeds the definition of each custom profile. The codec
+also reads formats 1вЂ“3. For a world save, `encodeFields` writes the custom profile
 ID, and `decodeFields` accepts the profile supplied by the game. Older world
 records without that ID use the supplied profile. Keep a profile ID and its
 part IDs stable across compatible releases, or migrate the affected saved state
 when changing its rules.
+
+## Active effects
+
+An effect has an instance ID unique within the organism, a type ID shared by
+instances of that effect, a target, and a map of parameters. Targets can be the
+whole body, one part, or several parts. Parameters support booleans, signed
+64-bit integers, finite floating-point numbers, and strings. Effect IDs, type
+IDs, and parameter names use letters AвЂ“Z, digits, dots, hyphens, or underscores.
+
+```cpp
+colony::physiology::Organism patient;
+patient.injuries.applyDamage(colony::injury::Part::Arm, 12);
+patient.addEffect({"bandage.analgesic.1", "analgesia",
+    colony::injury::Part::Arm, 30, {{"relief", .5}}});
+const double workMultiplier = patient.armMultiplier();
+```
+
+`analgesia` is a timed effect. A `relief` of 0.5 halves the penalty on the targeted
+parts. The strongest overlapping dose applies to each part. Physical
+incapacitation still prevents movement.
+
+Use `addEffect`, `updateEffect`, and `removeEffect` to manage the list.
+A missing duration makes a generic effect persistent. Call `advanceEffects`
+with simulation seconds and include `nextEffectEventSeconds` in the event
+horizon when splitting simulation steps at expiry. An optional tick handler
+receives the effect state at the start of the step and the time it was active.
+The timers reach the end of the step before handlers run. Changes made by a
+handler take effect on the next step.
+
+Format 4 stores effect identity, type, scope, parameters, and remaining time.
+World records embed the same effect list when it is present. Existing saves
+load with an empty list. Game-defined effect types retain their data across
+JSON round trips and can provide their behavior through the tick handler.

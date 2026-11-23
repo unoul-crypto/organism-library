@@ -5,6 +5,7 @@
 #include <array>
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <vector>
 
@@ -94,6 +95,14 @@ void thresholdsAndJson() {
     copy->injuries.advanceBlood(copy->injuries.nextBloodEventSeconds());
     require(copy->injuries.canWalk() && copy->injuries.bloodVolume()==2750,"Forecast when regeneration restores mobility");
     auto legacy = organism_codec::Json::parse(json);
+    require(legacy.at("profileId")=="robust-quadruped","Built-in profiles use stable string IDs");
+    legacy.erase("profileId");
+    legacy.erase("effects");
+    legacy["body"] = 1;
+    legacy["resilience"] = 1;
+    legacy["formatVersion"] = 2;
+    copy = organism_codec::decode(legacy.dump(),error);
+    require(copy && organism_codec::encode(*copy)==json,"Legacy format 2 restores its exact nutrition and injuries");
     legacy["formatVersion"] = 1;
     for (const auto* field : {"hunger","hungerUrgent","hungerEmergency","starvation"}) legacy.erase(field);
     copy = organism_codec::decode(legacy.dump(),error);
@@ -171,6 +180,13 @@ void customProfile() {
         result->injuries.downed() && result->injuries.wounds()[0].recoverySeconds()==9.75 &&
         result->injuries.profile().definition().id=="glider","Custom profiles and wounds survive standalone JSON");
 
+    auto legacy = organism_codec::Json::parse(json);
+    legacy["formatVersion"] = 3;
+    legacy.erase("profileId");
+    legacy.erase("effects");
+    const auto legacyResult = organism_codec::decode(legacy.dump(),error);
+    require(legacyResult && organism_codec::encode(*legacyResult)==json,"Legacy format 3 still restores custom profiles");
+
     auto fields = organism_codec::Json::object();
     organism_codec::encodeFields(fields,glider,true);
     require(fields.at("organismProfile")=="glider" &&
@@ -220,6 +236,97 @@ void customProfile() {
         slow.applyDamage(rightWing,8) && slow.downed(),"Custom movement wound limits work at full blood volume");
 }
 
+void activeEffects() {
+    using physiology::ActiveEffect;
+    using physiology::WholeBody;
+    physiology::Organism unit;
+    require(unit.injuries.applyDamage(Part::Arm,12) && unit.injuries.applyDamage(Part::Leg,4),
+        "Prepare impairment on two different parts");
+    require(unit.addEffect({"arm-dose","analgesia",Part::Arm,2,{{"relief",.5}}}) &&
+        unit.addEffect({"both-dose","analgesia",std::vector{Part::Arm,Part::Leg},1,{{"relief",.75}}}) &&
+        unit.addEffect({"general-dose","analgesia",WholeBody{},3,{{"relief",.25}}}),"Apply all three scopes");
+    require(std::abs(unit.armMultiplier()-.9375)<1e-9 && std::abs(unit.movementMultiplier()-.975)<1e-9 &&
+        unit.nextEffectEventSeconds()==1,"Use the strongest overlapping relief separately on each part");
+    require(!unit.addEffect({"arm-dose","unrelated",WholeBody{},std::nullopt,{}}) &&
+        !unit.addEffect({"infinite-dose","analgesia",WholeBody{},std::nullopt,{{"relief",1.0}}}) &&
+        !unit.addEffect({"bad-dose","analgesia",WholeBody{},1,{{"relief",2.0}}}) &&
+        !unit.addEffect({"bad-target","custom",std::vector{Part::Leg,Part::Leg},1,{}}) &&
+        !unit.addEffect({"missing-target","custom",leftWing,1,{}}),"Reject duplicate IDs, invalid relief and missing or duplicate target parts");
+
+    double activeInterval = 0;
+    unit.advanceEffects(1.5,[&](const ActiveEffect& effect,double elapsed) {
+        if (effect.id=="both-dose") {
+            activeInterval = elapsed;
+            require(unit.addEffect({"marker","custom.marker",Part::Torso,5,{}}),"Effects can create follow-up effects");
+        }
+    });
+    require(activeInterval==1 && !unit.findEffect("both-dose") && unit.findEffect("marker")->remainingSeconds==5 &&
+        std::abs(unit.armMultiplier()-.875)<1e-9 && std::abs(unit.movementMultiplier()-.925)<1e-9 &&
+        unit.nextEffectEventSeconds()==.5,"Advance only active time and leave follow-ups for the next step");
+    unit.advanceEffects(.5);
+    require(!unit.findEffect("arm-dose") && std::abs(unit.armMultiplier()-.8125)<1e-9,
+        "An expired targeted dose leaves just the whole-body dose");
+    require(unit.removeEffect("general-dose") && !unit.removeEffect("general-dose") && unit.armMultiplier()==.75 &&
+        unit.movementMultiplier()==.9,"Removing the last dose restores baseline penalties");
+
+    const ActiveEffect marker{"marker","custom.marker",Part::Head,10,{{"strength",std::int64_t{3}}}};
+    require(unit.updateEffect(marker) && unit.findEffect("marker")->affects(Part::Head) &&
+        !unit.findEffect("marker")->affects(Part::Torso) &&
+        !unit.updateEffect({"marker","another.type",Part::Head,10,{}}),"Update an effect while preserving its identity and type");
+    for (int i=0; i<100; ++i) unit.advanceEffects(.1);
+    require(unit.effects().empty() && std::isinf(unit.nextEffectEventSeconds()),"Exact and divided time both expire effects");
+
+    require(unit.injuries.applyDamage(Part::Leg,20) && unit.injuries.downed() &&
+        unit.addEffect({"strong-dose","analgesia",WholeBody{},2,{{"relief",1.0}}}) &&
+        unit.movementMultiplier()==0,"Relief does not reverse physical incapacitation");
+}
+
+void effectJson() {
+    using physiology::WholeBody;
+    const Profile profile(gliderDefinition());
+    physiology::Organism glider{profile};
+    require(glider.addEffect({"glider.spark.1","game.spark",std::vector{leftWing,rightWing},std::nullopt,
+            {{"active",true},{"count",std::int64_t{7}},{"intensity",.5},{"name",std::string("blue")}}}) &&
+        glider.addEffect({"glider.temporary.1","game.temporary",WholeBody{},4,{}}),"Create a persistent and a timed effect");
+    glider.advanceEffects(1);
+    const auto json = organism_codec::encode(glider);
+    const auto value = organism_codec::Json::parse(json);
+    require(value.at("formatVersion")==4 && value.at("profileId")=="glider" &&
+        value.at("effects")[0].at("type")=="game.spark" && value.at("effects")[0].at("target").at("parts")[0]==10,
+        "Persist profile, type, effect and part IDs independently of list positions");
+
+    std::string error;
+    const auto copy = organism_codec::decode(json,error);
+    require(copy && organism_codec::encode(*copy)==json && copy->nextEffectEventSeconds()==3 &&
+        copy->findEffect("glider.spark.1")->parameters==glider.findEffect("glider.spark.1")->parameters,
+        "Restore custom type IDs, part scope, all parameter types and the remaining lifetime");
+    auto fields = organism_codec::Json::object();
+    organism_codec::encodeFields(fields,glider,false);
+    require(organism_codec::decodeFields(fields,profile,false).effects().size()==2,
+        "World records include active effects even for organisms without nutrition");
+    fields.erase("effects");
+    require(organism_codec::decodeFields(fields,profile,false).effects().empty(),"Old world records start with an empty effect list");
+
+    auto invalid = value;
+    invalid["effects"].push_back(invalid["effects"][0]);
+    require(!organism_codec::decode(invalid.dump(),error),"Reject duplicate effect IDs in a save");
+    invalid = value;
+    invalid["effects"][0]["target"]["parts"][0] = 999;
+    require(!organism_codec::decode(invalid.dump(),error),"Reject unknown part IDs in a saved effect");
+    invalid = value;
+    invalid["effects"][0]["parameters"]["count"] = std::numeric_limits<std::uint64_t>::max();
+    require(!organism_codec::decode(invalid.dump(),error),"Reject integers beyond the effect parameter range");
+    invalid = value;
+    invalid["effects"][1]["remainingSeconds"] = 0;
+    require(!organism_codec::decode(invalid.dump(),error),"Reject expired entries in the active effect list");
+    invalid = value;
+    invalid["profileId"] = "wrong-glider";
+    require(!organism_codec::decode(invalid.dump(),error),"Reject conflicting profile IDs");
+    invalid = organism_codec::Json::parse(organism_codec::encode(physiology::Organism{}));
+    invalid["profileId"] = "unknown";
+    require(!organism_codec::decode(invalid.dump(),error),"Reject unknown built-in profile IDs");
+}
+
 } // namespace
 
 int main() {
@@ -228,6 +335,8 @@ int main() {
         nutritionForecast();
         thresholdsAndJson();
         customProfile();
+        activeEffects();
+        effectJson();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;
