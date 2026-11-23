@@ -162,3 +162,49 @@ change succeeds. Operations should mutate only the supplied organism.
 `encodeBodyActionTarget` and `decodeBodyActionTarget` in
 `physiology/OrganismJson.hpp` let applications save pending jobs by action and
 part ID. Keep the action ID stable when changing its presentation.
+
+## Organism viewer
+
+Set `ORGANISM_BUILD_VIEWER=ON` before adding this project with CMake and link
+`colony_organism_viewer`. The viewer uses the host's rendering and input through
+`physiology/viewer/OrganismViewer.hpp`. Implement the four `Canvas` operations,
+keep one `OrganismViewer` per open panel, and call `draw` each frame. Pass a click
+once, on release, and the wheel delta for that frame.
+
+With default options, the viewer displays an Anatomy tab. Built-in humanoid and
+quadruped profiles have diagrams. Custom profiles have a selectable list. To
+provide a diagram, use `Options::layers` to put part IDs in normalized rectangles.
+Multiple regions can share a part ID, as in the built-in paired limb groups.
+An empty layer displays all parts in a scrollable list.
+
+Wounds appear as red slashes. `Options::effectStyles` can provide labels and
+colored markers for individual effect types. The details panel shows wounds
+and active effects for a selected part. The overview lists whole-body effects.
+
+Set an effect style's `geometry` to control its marker. The rectangle contains
+`x`, `y`, width, and height as fractions of the part's diagram region, or of
+the marker area in a list row. Keep the entire rectangle within `[0, 1]`.
+The optional drawing function receives the resulting screen rectangle and the
+marker's color. Use the rectangle to draw a shape that scales with the diagram.
+
+```cpp
+options.effectStyles.push_back({
+    "strain", "Strain", viewer::Color{172, 112, 215},
+    viewer::MarkerGeometry{
+        {.15F, .20F, .35F, .25F},
+        [](viewer::Canvas& canvas, viewer::Rect box, viewer::Color color) {
+            canvas.line(box.x, box.y + box.height, box.x + box.width, box.y, 2, color);
+        }
+    }
+});
+```
+
+A color alone uses the original automatic placement. Geometry without a
+drawing function uses a rounded rectangle at the specified position.
+
+Provide the catalog and `partButtons` to show registered actions for the selected
+part. The host can disable actions that need unavailable resources. To add
+buttons below active effects, set `effectButtons`. Each request identifies the
+selected part and, for an effect button, the exact effect instance ID. The host
+executes requests through its own rules and task system. Call `reset` when the
+viewer switches to another organism.
