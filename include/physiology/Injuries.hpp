@@ -3,6 +3,8 @@
 #include "physiology/InjuryProfile.hpp"
 #include "physiology/BloodVolume.hpp"
 
+#include <cstdint>
+#include <functional>
 #include <vector>
 
 namespace colony::injury {
@@ -10,6 +12,7 @@ namespace colony::injury {
 enum class Body { Humanoid = 0, Quadruped = 1, Custom = 2 };
 enum class Resilience { Normal = 0, Robust = 1 };
 enum class WoundKind { Impact, Open };
+using WoundId = std::uint64_t;
 
 struct BuiltinProfile {
     Body body;
@@ -17,6 +20,14 @@ struct BuiltinProfile {
 };
 
 [[nodiscard]] std::optional<BuiltinProfile> findBuiltinProfile(std::string_view id);
+
+struct Wound;
+using WoundRecoveryFactor = std::function<double(const Wound&)>;
+
+struct WoundRecoveryContext {
+    double activityMultiplier = 1; // Standard bed rest. Use zero when recovery is inactive.
+    std::vector<WoundRecoveryFactor> factors; // Read-only rules evaluated for each wound.
+};
 
 struct Wound {
     Part part;
@@ -28,9 +39,11 @@ struct Wound {
     double untreatedRecoveryRate = .1;
     double treatedRecoveryRate = 1;
     double lossPerOpenDamage = .5;
+    WoundId id = 0;
     [[nodiscard]] physiology::EffectTarget<Part> target() const { return part; }
-    [[nodiscard]] double recoveryRate() const { return treated ? treatedRecoveryRate : untreatedRecoveryRate; }
-    [[nodiscard]] double recoverySeconds() const { return restRemaining/recoveryRate(); }
+    [[nodiscard]] double recoveryRate(const WoundRecoveryContext& context = {}) const;
+    [[nodiscard]] double recoverySeconds(const WoundRecoveryContext& context = {}) const;
+    void advanceRecovery(double seconds,const WoundRecoveryContext& context = {});
     [[nodiscard]] double bloodLossRate() const { return treated ? 0 : openDamage * lossPerOpenDamage; }
     [[nodiscard]] double impairmentMultiplier() const;
 };
@@ -58,6 +71,9 @@ public:
     [[nodiscard]] const Profile& profile() const { return profile_; }
     [[nodiscard]] const physiology::Anatomy<Part>& anatomy() const { return profile_.anatomy(); }
     [[nodiscard]] const std::vector<Wound>& wounds() const { return wounds_; }
+    [[nodiscard]] const Wound* findWound(WoundId id) const;
+    [[nodiscard]] WoundId nextWoundId() const { return nextWoundId_; }
+    bool restoreNextWoundId(WoundId id);
     [[nodiscard]] bool hasWound(Part part) const;
     [[nodiscard]] int trauma() const { return trauma_; }
     [[nodiscard]] double injuryChance() const { return profile_.definition().trauma.injuryChance; }
@@ -83,12 +99,16 @@ public:
     [[nodiscard]] bool needsTreatment() const;
     // Treat one wound, preferring higher severity and then greater damage.
     void treat();
+    // Treat only the given wound, if it is present and untreated.
+    bool treat(WoundId id);
     void restInBed(double seconds);
-    [[nodiscard]] double nextRecoverySeconds() const;
+    void advanceRecovery(double seconds,const WoundRecoveryContext& context);
+    [[nodiscard]] double nextRecoverySeconds(const WoundRecoveryContext& context = {}) const;
 
 private:
     [[nodiscard]] double multiplier(bool ProfilePart::*affected) const;
     [[nodiscard]] Wound configuredWound(Wound wound) const;
+    bool appendWound(Wound wound);
     [[nodiscard]] int traumaFromDamage(double damage) const;
     void refreshTrauma();
     Body body_ = Body::Custom;
@@ -96,6 +116,7 @@ private:
     Profile profile_;
     physiology::BloodVolume blood_;
     std::vector<Wound> wounds_;
+    WoundId nextWoundId_ = 1;
     int trauma_ = 0;
 };
 

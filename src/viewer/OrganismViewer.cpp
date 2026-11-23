@@ -156,8 +156,21 @@ struct Row {
     std::string detail;
     Color color = muted;
     std::optional<Button> action;
-    std::optional<std::string> effectId;
+    BodyActionSubject subject;
 };
+
+void addInstanceRow(std::vector<Row>& rows, Row row, const Organism& organism, injury::Part part,
+    const Actions& actions) {
+    const auto cardIndex = rows.size();
+    rows.push_back(std::move(row));
+    if (!actions.catalog) return;
+    for (const auto& action : actions.instanceButtons) {
+        auto& entry = rows[cardIndex];
+        if (!actions.catalog->canApply(organism,{action.id,part,entry.subject})) continue;
+        if (!entry.action) entry.action = action;
+        else rows.push_back({{}, {}, accent, Button{action.id,action.label+" / "+entry.title,action.enabled},entry.subject});
+    }
+}
 
 std::vector<Row> details(const Organism& organism, std::optional<injury::Part> part, const Options& options) {
     std::vector<Row> rows;
@@ -172,7 +185,8 @@ std::vector<Row> details(const Organism& organism, std::optional<injury::Part> p
             auto detail = std::string(wound.treated ? "Treated" : "Untreated")+" | "+number(wound.damage,1)+
                 " dmg | "+number(std::ceil(wound.recoverySeconds()))+"s rest";
             if (wound.bloodLossRate() > 0) detail += " | "+number(wound.bloodLossRate(),1)+" mL/s";
-            rows.push_back({severity[static_cast<int>(wound.severity)],std::move(detail),woundInk});
+            addInstanceRow(rows,{severity[static_cast<int>(wound.severity)],std::move(detail),woundInk,{},wound.id},
+                organism,*part,actions);
         }
     }
     bool hasEffects = std::any_of(organism.injuries.wounds().begin(),organism.injuries.wounds().end(),
@@ -185,7 +199,9 @@ std::vector<Row> details(const Organism& organism, std::optional<injury::Part> p
         auto detail = effect.remainingSeconds ? number(std::ceil(*effect.remainingSeconds))+"s remaining" : std::string("Active");
         if (wholeBody) detail += "  |  Whole body";
         else if (std::holds_alternative<std::vector<injury::Part>>(effect.target)) detail += "  |  Multiple parts";
-        rows.push_back({style.label.empty() ? effect.typeId : style.label,std::move(detail),style.marker.value_or(muted)});
+        Row effectRow{style.label.empty() ? effect.typeId : style.label,std::move(detail),style.marker.value_or(muted),{},effect.id};
+        if (part) addInstanceRow(rows,std::move(effectRow),organism,*part,options.actions);
+        else rows.push_back(std::move(effectRow));
         if (part && options.actions.effectButtons) {
             for (auto action : options.actions.effectButtons(*part,effect))
                 if (!action.id.empty()) rows.push_back({{}, {}, accent, std::move(action), effect.id});
@@ -298,13 +314,20 @@ std::optional<ActionRequest> OrganismViewer::draw(Canvas& canvas, Rect bounds, c
     for (auto index=detailScroll_; index<end; ++index) {
         const auto& row = rows[index];
         const Rect box{area.x,area.y+(index-detailScroll_)*stride,area.width-7,stride-5};
+        float titleWidth=box.width-16;
+        if (!row.title.empty()) canvas.fill(box,card,.20F);
         if (row.action) {
-            if (button(canvas,box,input,row.action->label,row.action->enabled))
-                request=ActionRequest{{row.action->id,*selectedPart_},row.effectId};
-            continue;
+            const float actionWidth = std::min(116.F,box.width*.46F);
+            const Rect control = row.title.empty() ? box : Rect{box.x+box.width-actionWidth-5,box.y+2,actionWidth,18};
+            if (button(canvas,control,input,row.action->label,row.action->enabled)) {
+                const auto* effectId = std::get_if<std::string>(&row.subject);
+                request=ActionRequest{{row.action->id,*selectedPart_,row.subject},
+                    effectId ? std::optional<std::string>{*effectId} : std::nullopt};
+            }
+            if (row.title.empty()) continue;
+            titleWidth-=actionWidth+4;
         }
-        canvas.fill(box,card,.20F);
-        label(canvas,{box.x+8,box.y+3,box.width-16,16},row.title,14,row.color);
+        label(canvas,{box.x+8,box.y+3,titleWidth,16},row.title,14,row.color);
         label(canvas,{box.x+8,box.y+20,box.width-16,13},row.detail,12);
     }
     return request;

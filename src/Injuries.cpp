@@ -87,6 +87,31 @@ double Wound::impairmentMultiplier() const {
     return index < speed.size() ? speed[index] : 1;
 }
 
+double Wound::recoveryRate(const WoundRecoveryContext& context) const {
+    if (!std::isfinite(context.activityMultiplier) || context.activityMultiplier <= 0) return 0;
+    double rate = (treated ? treatedRecoveryRate : untreatedRecoveryRate)*context.activityMultiplier;
+    for (const auto& factor : context.factors) {
+        if (!factor) continue;
+        const double multiplier = factor(*this);
+        if (!std::isfinite(multiplier) || multiplier <= 0) return 0;
+        rate *= multiplier;
+    }
+    return std::isfinite(rate) && rate > 0 ? rate : 0;
+}
+
+double Wound::recoverySeconds(const WoundRecoveryContext& context) const {
+    const double rate = recoveryRate(context);
+    return rate > 0 ? restRemaining/rate : std::numeric_limits<double>::infinity();
+}
+
+void Wound::advanceRecovery(double seconds,const WoundRecoveryContext& context) {
+    if (!std::isfinite(seconds) || seconds <= 0) return;
+    const double rate = recoveryRate(context);
+    if (rate <= 0) return;
+    restRemaining -= seconds*rate;
+    if (restRemaining <= 1e-9) restRemaining = 0;
+}
+
 State::State(Body body, Resilience resilience) : State(builtinProfile(body,resilience)) {
     body_ = body;
     resilience_ = resilience;
@@ -102,6 +127,26 @@ Wound State::configuredWound(Wound wound) const {
     wound.treatedRecoveryRate = rules.recovery.treatedRate;
     wound.lossPerOpenDamage = rules.blood.lossPerOpenDamage;
     return wound;
+}
+
+bool State::appendWound(Wound wound) {
+    if (wound.id == 0) wound.id = nextWoundId_;
+    else if (findWound(wound.id)) return false;
+    if (wound.id == std::numeric_limits<WoundId>::max()) return false;
+    wounds_.push_back(configuredWound(wound));
+    nextWoundId_ = std::max(nextWoundId_,wound.id+1);
+    return true;
+}
+
+const Wound* State::findWound(WoundId id) const {
+    const auto found = std::find_if(wounds_.begin(),wounds_.end(),[id](const Wound& wound) { return wound.id == id; });
+    return found == wounds_.end() ? nullptr : &*found;
+}
+
+bool State::restoreNextWoundId(WoundId id) {
+    if (id < nextWoundId_) return false;
+    nextWoundId_ = id;
+    return true;
 }
 
 double State::bloodLossRate() const {
@@ -186,12 +231,14 @@ bool State::applyDamage(Part part,double damage,WoundKind kind) {
     damage=std::min(damage,maximumDamage);
     const auto& rules = profile_.definition();
     const auto severity = classify(damage,rules.trauma);
-    const Wound replacement = configuredWound({part,severity,rules.recovery.bedRestSeconds[severityIndex(severity)],
-        false,damage,std::min(openDamage,damage)});
+    Wound replacement{part,severity,rules.recovery.bedRestSeconds[severityIndex(severity)],false,damage,std::min(openDamage,damage)};
     auto existing=std::find_if(wounds_.begin(),wounds_.end(),[&](const Wound& wound) { return wound.part==part; });
-    if (existing==wounds_.end()) wounds_.push_back(replacement);
+    if (existing==wounds_.end()) {
+        if (!appendWound(replacement)) return false;
+    }
     else {
-        *existing=replacement;
+        replacement.id=existing->id;
+        *existing=configuredWound(replacement);
         wounds_.erase(std::remove_if(std::next(existing),wounds_.end(),[&](const Wound& wound) { return wound.part==part; }),wounds_.end());
     }
     refreshTrauma();
@@ -222,24 +269,29 @@ bool State::restoreWound(const Wound& wound) {
     if (severity==Severity::Mild && std::any_of(wounds_.begin(),wounds_.end(),[&](const Wound& wound) {
         return wound.part==part && wound.severity==Severity::Mild;
     })) return false;
-    wounds_.push_back(configuredWound(wound));
+    if (!appendWound(wound)) return false;
     refreshTrauma();
     return true;
 }
 
 void State::restInBed(double seconds) {
-    if (!alive() || !std::isfinite(seconds) || seconds<=0) return;
-    for (auto& wound : wounds_) wound.restRemaining -= seconds*wound.recoveryRate();
-    wounds_.erase(std::remove_if(wounds_.begin(),wounds_.end(),[&](const Wound& wound) {
-        if (wound.restRemaining>1e-9) return false;
-        return true;
-    }),wounds_.end());
+    advanceRecovery(seconds,{});
+}
+
+void State::advanceRecovery(double seconds,const WoundRecoveryContext& context) {
+    if (!alive() || !std::isfinite(seconds) || seconds <= 0 || wounds_.empty()) return;
+    for (auto& wound : wounds_) wound.advanceRecovery(seconds,context);
+    const auto healed = std::remove_if(wounds_.begin(),wounds_.end(),[](const Wound& wound) {
+        return wound.restRemaining==0;
+    });
+    if (healed == wounds_.end()) return;
+    wounds_.erase(healed,wounds_.end());
     refreshTrauma();
 }
 
-double State::nextRecoverySeconds() const {
+double State::nextRecoverySeconds(const WoundRecoveryContext& context) const {
     double next = std::numeric_limits<double>::infinity();
-    if (alive()) for (const auto& wound : wounds_) next = std::min(next,wound.recoverySeconds());
+    if (alive()) for (const auto& wound : wounds_) next = std::min(next,wound.recoverySeconds(context));
     return next;
 }
 
@@ -260,6 +312,13 @@ void State::treat() {
             (wound.severity==worst->severity && wound.damage>worst->damage)) worst=&wound;
     }
     if (worst) worst->treated=true;
+}
+
+bool State::treat(WoundId id) {
+    const auto found = std::find_if(wounds_.begin(),wounds_.end(),[id](const Wound& wound) { return wound.id == id; });
+    if (!alive() || found == wounds_.end() || found->treated) return false;
+    found->treated = true;
+    return true;
 }
 
 double State::multiplier(bool ProfilePart::*affected) const {

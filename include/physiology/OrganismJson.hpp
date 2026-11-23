@@ -11,9 +11,11 @@ using Json = nlohmann::ordered_json;
 // Structured access for embedding an organism in a larger JSON document.
 // The caller supplies the profile and chooses whether that record tracks nutrition.
 void encodeFields(Json& value, const physiology::Organism& organism, bool includeNutrition);
-physiology::Organism decodeFields(const Json& value, injury::Body body, injury::Resilience resilience, bool includeNutrition);
+physiology::Organism decodeFields(const Json& value, injury::Body body, injury::Resilience resilience, bool includeNutrition,
+                                  bool requireWoundIds = false);
 // A record with an explicit profile ID must match the supplied definition.
-physiology::Organism decodeFields(const Json& value, const injury::Profile& profile, bool includeNutrition);
+physiology::Organism decodeFields(const Json& value, const injury::Profile& profile, bool includeNutrition,
+                                  bool requireWoundIds = false);
 
 Json encodeInjuries(const injury::State& injuries);
 injury::State decodeInjuries(const Json& value, injury::Body body, injury::Resilience resilience,

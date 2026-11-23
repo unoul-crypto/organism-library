@@ -2,6 +2,7 @@
 #include "physiology/OrganismJson.hpp"
 
 #include <nlohmann/json.hpp>
+#include <charconv>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -24,6 +25,14 @@ int intValue(const Json& value) {
             "Integer is out of range.");
     }
     return value.get<int>();
+}
+
+injury::WoundId woundId(const Json& value) {
+    const auto text = value.get<std::string>();
+    injury::WoundId id = 0;
+    const auto parsed = std::from_chars(text.data(),text.data()+text.size(),id);
+    require(parsed.ec == std::errc{} && parsed.ptr == text.data()+text.size() && id != 0,"Invalid wound ID.");
+    return id;
 }
 
 double number(const Json& value) {
@@ -115,15 +124,17 @@ injury::Profile decodeProfile(const Json& json) {
     return injury::Profile(std::move(profile));
 }
 
-void restoreInjuries(injury::State& result, const Json& value, bool allowMissingOpenDamage) {
+void restoreInjuries(injury::State& result, const Json& value, bool allowMissingOpenDamage, bool requireWoundIds = false) {
     require(value.is_array(),"Expected an array of injuries.");
     for (const auto& wound : value) {
         const auto part = static_cast<injury::Part>(intValue(wound.at("part")));
         const auto severity = static_cast<injury::Severity>(intValue(wound.at("severity")));
         const double openDamage = allowMissingOpenDamage && !wound.contains("openDamage") ?
             0 : number(wound.at("openDamage"));
-        require(result.restoreWound({part,severity,number(wound.at("restRemaining")),flag(wound.at("treated")),
-            number(wound.at("damage")),openDamage}),"Invalid injury.");
+        injury::Wound injury{part,severity,number(wound.at("restRemaining")),flag(wound.at("treated")),
+            number(wound.at("damage")),openDamage};
+        if (requireWoundIds || wound.contains("id")) injury.id = woundId(wound.at("id"));
+        require(result.restoreWound(injury),"Invalid or duplicate injury.");
     }
 }
 
@@ -197,15 +208,19 @@ void restoreEffects(physiology::Organism& organism, const Json& value) {
 
 void writeStateFields(Json& value, const physiology::Organism& organism, bool includeNutrition) {
     value["injuries"] = encodeInjuries(organism.injuries);
+    value["nextWoundId"] = std::to_string(organism.injuries.nextWoundId());
     value["bloodVolumeMl"] = organism.injuries.bloodVolume();
     if (includeNutrition) encodeNutrition(value,organism.nutrition);
 }
 
-physiology::Organism readStateFields(const Json& value, physiology::Organism result, bool includeNutrition) {
+physiology::Organism readStateFields(const Json& value, physiology::Organism result, bool includeNutrition,bool requireWoundIds) {
     if (value.contains("organismProfile"))
         require(result.injuries.body() == injury::Body::Custom &&
             value.at("organismProfile") == result.injuries.profile().definition().id,"Wrong organism profile.");
-    restoreInjuries(result.injuries,value.at("injuries"),false);
+    const bool hasWoundIds = requireWoundIds || value.contains("nextWoundId");
+    restoreInjuries(result.injuries,value.at("injuries"),false,hasWoundIds);
+    if (hasWoundIds)
+        require(result.injuries.restoreNextWoundId(woundId(value.at("nextWoundId"))),"Invalid next wound ID.");
     require(result.injuries.restoreBloodVolume(number(value.at("bloodVolumeMl"))),"Invalid blood volume.");
     if (includeNutrition) result.nutrition = decodeNutrition(value);
     if (value.contains("effects")) restoreEffects(result,value.at("effects"));
@@ -220,29 +235,35 @@ physiology::Organism decodeLegacy(const Json& value, bool includeNutrition) {
     return decodeFields(value,body,resilience,includeNutrition);
 }
 
-physiology::Organism decodeCurrent(const Json& value) {
+physiology::Organism decodeCurrent(const Json& value,bool requireWoundIds) {
     const auto id = value.at("profileId").get<std::string>();
     require(value.at("effects").is_array(),"Expected an array of active effects.");
     if (value.contains("profile")) {
         const auto profile = decodeProfile(value.at("profile"));
         require(profile.definition().id == id,"Wrong organism profile.");
-        return decodeFields(value,profile,true);
+        return decodeFields(value,profile,true,requireWoundIds);
     }
     const auto builtin = injury::findBuiltinProfile(id);
     require(builtin.has_value(),"Unknown built-in organism profile.");
-    return decodeFields(value,builtin->body,builtin->resilience,true);
+    return decodeFields(value,builtin->body,builtin->resilience,true,requireWoundIds);
 }
 }
 
 Json encodeBodyActionTarget(const physiology::BodyActionTarget& target) {
-    return Json{{"id",target.id},{"part",static_cast<int>(target.part)}};
+    Json value{{"id",target.id},{"part",static_cast<int>(target.part)}};
+    if (const auto* id = std::get_if<injury::WoundId>(&target.subject)) value["woundId"] = std::to_string(*id);
+    if (const auto* id = std::get_if<std::string>(&target.subject)) value["effectId"] = *id;
+    return value;
 }
 
 physiology::BodyActionTarget decodeBodyActionTarget(const Json& value,const physiology::BodyActionCatalog& catalog) {
-    auto id = value.at("id").get<std::string>();
     const int part = intValue(value.at("part"));
-    require(catalog.find(id) && part >= 0,"Invalid body action target.");
-    return {std::move(id),static_cast<injury::Part>(part)};
+    require(part >= 0 && !(value.contains("woundId") && value.contains("effectId")),"Invalid body action target.");
+    physiology::BodyActionTarget target{value.at("id").get<std::string>(),static_cast<injury::Part>(part)};
+    if (value.contains("woundId")) target.subject = woundId(value.at("woundId"));
+    else if (value.contains("effectId")) target.subject = value.at("effectId").get<std::string>();
+    require(catalog.recognizes(target),"Invalid body action target.");
+    return target;
 }
 
 Json encodeInjuries(const injury::State& injuries) {
@@ -250,7 +271,7 @@ Json encodeInjuries(const injury::State& injuries) {
     for (const auto& wound : injuries.wounds())
         result.push_back(Json{{"part",static_cast<int>(wound.part)},{"severity",static_cast<int>(wound.severity)},
             {"restRemaining",wound.restRemaining},{"treated",wound.treated?1:0},{"damage",wound.damage},
-            {"openDamage",wound.openDamage}});
+            {"openDamage",wound.openDamage},{"id",std::to_string(wound.id)}});
     return result;
 }
 
@@ -271,17 +292,17 @@ void encodeFields(Json& value, const physiology::Organism& organism, bool includ
 }
 
 physiology::Organism decodeFields(const Json& value, injury::Body body, injury::Resilience resilience,
-                                 bool includeNutrition) {
-    return readStateFields(value,physiology::Organism{body,resilience},includeNutrition);
+                                 bool includeNutrition,bool requireWoundIds) {
+    return readStateFields(value,physiology::Organism{body,resilience},includeNutrition,requireWoundIds);
 }
 
-physiology::Organism decodeFields(const Json& value, const injury::Profile& profile, bool includeNutrition) {
-    return readStateFields(value,physiology::Organism{profile},includeNutrition);
+physiology::Organism decodeFields(const Json& value, const injury::Profile& profile, bool includeNutrition,bool requireWoundIds) {
+    return readStateFields(value,physiology::Organism{profile},includeNutrition,requireWoundIds);
 }
 
 std::string encode(const physiology::Organism& organism) {
     const auto& injuries = organism.injuries;
-    Json value{{"formatVersion",4},{"profileId",injuries.profile().definition().id}};
+    Json value{{"formatVersion",5},{"profileId",injuries.profile().definition().id}};
     if (injuries.body() == injury::Body::Custom)
         value["profile"] = encodeProfile(injuries.profile().definition());
     writeStateFields(value,organism,true);
@@ -293,8 +314,8 @@ std::optional<physiology::Organism> decode(std::string_view json, std::string& e
     try {
         const auto value = Json::parse(json);
         const int version = intValue(value.at("formatVersion"));
-        require(version >= 1 && version <= 4,"Unsupported organism format.");
-        auto result = version == 4 ? decodeCurrent(value) :
+        require(version >= 1 && version <= 5,"Unsupported organism format.");
+        auto result = version >= 4 ? decodeCurrent(value,version >= 5) :
             version == 3 ? decodeFields(value,decodeProfile(value.at("profile")),true) :
             decodeLegacy(value,version == 2);
         error.clear();

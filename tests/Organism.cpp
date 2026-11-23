@@ -291,7 +291,7 @@ void effectJson() {
     glider.advanceEffects(1);
     const auto json = organism_codec::encode(glider);
     const auto value = organism_codec::Json::parse(json);
-    require(value.at("formatVersion")==4 && value.at("profileId")=="glider" &&
+    require(value.at("formatVersion")==5 && value.at("profileId")=="glider" &&
         value.at("effects")[0].at("type")=="game.spark" && value.at("effects")[0].at("target").at("parts")[0]==10,
         "Persist profile, type, effect and part IDs independently of list positions");
 
@@ -377,6 +377,99 @@ void bodyActions() {
     require(rejected,"Reject duplicate stable action IDs");
 }
 
+void instanceActions() {
+    using namespace physiology;
+    Organism patient;
+    require(patient.injuries.restoreWound({Part::Arm,Severity::Serious,90,false,12,12}) &&
+        patient.injuries.restoreWound({Part::Arm,Severity::Mild,30,false,4,4}),"Prepare two bleeding wounds on the same part");
+    const auto first=patient.injuries.wounds()[0].id;
+    const auto second=patient.injuries.wounds()[1].id;
+    require(first && second && first!=second,"Allocate distinct wound IDs");
+    const BodyActionCatalog catalog({}, {bandageWoundAction()}, {
+        {"remove_strain",[](Organism& organism,const ActiveEffect& effect) { return organism.removeEffect(effect.id); },
+            [](const Organism&,const ActiveEffect& effect) { return effect.typeId=="strain"; }},
+    });
+    const BodyActionTarget bandage{bandageWoundActionId,Part::Arm,second};
+    const auto treated=catalog.prepare(patient,bandage);
+    require(treated && !patient.injuries.findWound(second)->treated && treated->injuries.findWound(second)->treated &&
+        !treated->injuries.findWound(first)->treated && treated->injuries.bloodLossRate()==6,
+        "Preparing a bandage stops only the chosen wound's bleeding in the result");
+    require(!catalog.canApply(patient,{bandageWoundActionId,Part::Leg,second}) &&
+        !catalog.canApply(patient,{bandageWoundActionId,Part::Arm}),"Reject a wrong body part or a missing wound ID");
+    require(catalog.apply(patient,bandage) && !catalog.apply(patient,bandage),"A wound can only be bandaged once until reopened");
+    auto encoded=organism_codec::Json::parse(organism_codec::encode(patient));
+    const auto savedTarget=organism_codec::encodeBodyActionTarget(bandage);
+    std::string error;
+    auto restored=organism_codec::decode(encoded.dump(),error);
+    require(savedTarget.at("woundId")==std::to_string(second) &&
+        organism_codec::decodeBodyActionTarget(savedTarget,catalog)==bandage &&
+        restored && restored->injuries.findWound(second)->treated,"Round-trip the action target and its exact wound");
+
+    auto legacy=encoded;
+    legacy["formatVersion"]=4;
+    legacy.erase("nextWoundId");
+    for (auto& wound:legacy["injuries"]) wound.erase("id");
+    const auto migrated=organism_codec::decode(legacy.dump(),error);
+    require(migrated && migrated->injuries.wounds()[0].id!=migrated->injuries.wounds()[1].id,
+        "Assign distinct IDs when loading saves without them");
+    encoded["injuries"][1]["id"]=encoded["injuries"][0]["id"];
+    require(!organism_codec::decode(encoded.dump(),error),"Reject duplicate wound IDs");
+
+    patient.injuries.restInBed(1000);
+    restored=organism_codec::decode(organism_codec::encode(patient),error);
+    require(restored && restored->injuries.applyDamage(Part::Arm,4) &&
+        restored->injuries.wounds()[0].id>second && !catalog.canApply(*restored,bandage),
+        "Healing and reloading cannot reuse an old wound ID");
+
+    require(patient.addEffect({"strain.one","strain",Part::Arm,10,{}}) &&
+        patient.addEffect({"strain.two","strain",std::vector{Part::Arm,Part::Leg},10,{}}),"Add two effects of the same type");
+    const BodyActionTarget remove{"remove_strain",Part::Leg,std::string("strain.two")};
+    require(!catalog.canApply(patient,{"remove_strain",Part::Leg,std::string("strain.one")}) &&
+        organism_codec::decodeBodyActionTarget(organism_codec::encodeBodyActionTarget(remove),catalog)==remove &&
+        catalog.apply(patient,remove) && patient.findEffect("strain.one") && !patient.findEffect("strain.two"),
+        "An effect action validates scope and changes only the selected instance");
+}
+
+void recoveryFactors() {
+    using namespace injury;
+    State injuries;
+    require(injuries.record(Part::Arm,Severity::Mild,20,true) &&
+        injuries.record(Part::Arm,Severity::Serious,20),"Create two wounds with different treatment on one part");
+    const auto treated=injuries.wounds()[0].id;
+    const auto untreated=injuries.wounds()[1].id;
+    require(injuries.nextRecoverySeconds()==20,"Default recovery still uses the profile and treatment");
+    const WoundRecoveryContext inactive{0,{}};
+    injuries.advanceRecovery(10,inactive);
+    require(injuries.findWound(treated)->restRemaining==20 && injuries.findWound(untreated)->restRemaining==20 &&
+        std::isinf(injuries.nextRecoverySeconds(inactive)),"Inactive recovery makes no progress and forecasts no healing");
+
+    WoundRecoveryContext conditions{.5,{
+        [](const Wound&) { return 2.0; },
+        [treated](const Wound& wound) { return wound.id==treated ? 0.0 : .5; }
+    }};
+    require(!injuries.findWound(treated)->recoveryRate(conditions) &&
+        std::abs(injuries.findWound(untreated)->recoveryRate(conditions)-.05)<1e-9 &&
+        std::abs(injuries.nextRecoverySeconds(conditions)-400)<1e-9,
+        "Combine activity, treatment and wound-specific factors in the forecast");
+    injuries.advanceRecovery(200,conditions);
+    require(injuries.findWound(treated)->restRemaining==20 &&
+        std::abs(injuries.findWound(untreated)->restRemaining-10)<1e-9 &&
+        std::abs(injuries.nextRecoverySeconds(conditions)-200)<1e-9,
+        "Use the same rates for elapsed time and remaining time");
+    injuries.advanceRecovery(injuries.nextRecoverySeconds(conditions),conditions);
+    require(injuries.findWound(treated) && !injuries.findWound(untreated) &&
+        std::isinf(injuries.nextRecoverySeconds(conditions)),"Only the wound predicted to heal is removed");
+
+    conditions.factors.back()=[](const Wound&) { return std::numeric_limits<double>::quiet_NaN(); };
+    injuries.advanceRecovery(10,conditions);
+    require(injuries.findWound(treated)->restRemaining==20 && std::isinf(injuries.nextRecoverySeconds(conditions)),
+        "An invalid modifier cannot advance recovery or create a recovery event");
+    conditions.factors.pop_back();
+    require(injuries.nextRecoverySeconds(conditions)==20,"Removing the pause preserves remaining recovery work");
+    injuries.advanceRecovery(20,conditions);
+    require(injuries.wounds().empty(),"Resume recovery when the conditions change");
+}
+
 } // namespace
 
 int main() {
@@ -388,6 +481,8 @@ int main() {
         activeEffects();
         effectJson();
         bodyActions();
+        instanceActions();
+        recoveryFactors();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

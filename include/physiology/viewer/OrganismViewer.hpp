@@ -65,11 +65,13 @@ struct Actions {
     const BodyActionCatalog* catalog = nullptr;
     std::vector<Button> partButtons;
     std::function<std::vector<Button>(injury::Part,const ActiveEffect&)> effectButtons;
+    // Registered actions such as bandaging, shown beside each eligible wound or effect.
+    std::vector<Button> instanceButtons;
 };
 
 struct ActionRequest {
-    BodyActionTarget target; // The action ID and the selected body part.
-    std::optional<std::string> effectId; // Set for a button supplied by effectButtons.
+    BodyActionTarget target;
+    std::optional<std::string> effectId; // Mirrors an active-effect ID in target.subject.
 };
 
 struct Options {

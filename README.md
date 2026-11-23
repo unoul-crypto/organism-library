@@ -82,9 +82,9 @@ damage threshold in a wound contributes one trauma point. Recovery parameters
 set bed rest work for each wound severity and its rates before and after
 treatment.
 
-Standalone JSON format 4 uses a stable string `profileId` for built-in and
+Standalone JSON format 5 uses a stable string `profileId` for built-in and
 custom profiles. It embeds the definition of each custom profile. The codec
-also reads formats 1вЂ“3. For a world save, `encodeFields` writes the custom profile
+also reads formats 1 through 4. For a world save, `encodeFields` writes the custom profile
 ID, and `decodeFields` accepts the profile supplied by the game. Older world
 records without that ID use the supplied profile. Keep a profile ID and its
 part IDs stable across compatible releases, or migrate the affected saved state
@@ -122,7 +122,7 @@ handler take effect on the next step.
 Call `advanceCondition` to advance blood volume and effects in the same step.
 `nextConditionEventSeconds` returns the earlier of their event deadlines.
 
-Format 4 stores effect identity, type, scope, parameters, and remaining time.
+Standalone format 4 introduced effect identity, type, scope, parameters, and remaining time.
 World records embed the same effect list when it is present. Existing saves
 load with an empty list. Game-defined effect types retain their data across
 JSON round trips and can provide their behavior through the tick handler.
@@ -165,6 +165,50 @@ change succeeds. Operations should mutate only the supplied organism.
 `encodeBodyActionTarget` and `decodeBodyActionTarget` in
 `physiology/OrganismJson.hpp` let applications save pending jobs by action and
 part ID. Keep the action ID stable when changing its presentation.
+
+### Wound and effect actions
+
+Register `WoundActionDefinition` and `EffectActionDefinition` in the second
+and third catalog arguments. The catalog checks that the instance exists and
+affects the specified part before applying the action. For example, the
+library's `bandageWoundAction()` treats one untreated wound. The host can wrap
+`prepare` with its own supply and work rules.
+
+```cpp
+#include "physiology/BodyActions.hpp"
+
+using namespace colony::physiology;
+
+bool bandage(Organism& patient, colony::injury::Part part, colony::injury::WoundId id) {
+    const BodyActionCatalog actions({}, {bandageWoundAction()});
+    return actions.apply(patient, {bandageWoundActionId, part, id});
+}
+```
+
+`BodyActionTarget::subject` holds a wound's numeric ID or an active effect's
+string ID. Leave it empty for a part action. The target codec stores instance
+IDs as `woundId` or `effectId`. When queuing effect actions, keep each effect ID
+associated with the same logical instance.
+
+Format 5 stores wound IDs and the next ID as decimal strings. Loading older
+saves assigns a distinct ID to each wound. New wounds receive fresh IDs after
+healing and reloading. A hit that merges wounds on the same part keeps the
+first wound's ID. The other IDs no longer resolve to wounds.
+
+### Wound recovery
+
+`WoundRecoveryContext` applies an activity multiplier and optional per-wound
+factors to the profile's treated or untreated recovery rate. The default
+context uses the normal bed-rest rates. A factor of 1 leaves the rate as it
+is. Zero, a negative value, or a non-finite value pauses recovery. Paused wounds
+retain their remaining work and have no predicted recovery event.
+
+Use the same context for `injury::State::advanceRecovery` and
+`nextRecoverySeconds`. Factor callbacks may use a wound's stable ID to read
+the app's conditions or a related active effect. Keep these inputs stable
+over a simulation step and recompute the rate when the conditions change.
+`restInBed` uses the default context, and `Wound::recoverySeconds(context)`
+reports the time for a single wound under the given conditions.
 
 ## Organism viewer
 
@@ -222,9 +266,10 @@ viewer::Options strainViewerOptions() {
 A color alone uses the original automatic placement. Geometry without a
 drawing function uses a rounded rectangle at the specified position.
 
-Provide the catalog and `partButtons` to show registered actions for the selected
-part. The host can disable actions that need unavailable resources. To add
-buttons below active effects, set `effectButtons`. Each request identifies the
-selected part and, for an effect button, the exact effect instance ID. The host
-executes requests through its own rules and task system. Call `reset` when the
-viewer switches to another organism.
+Provide the catalog and `partButtons` for actions on the selected part. Add
+`instanceButtons` for registered actions beside individual wounds or active
+effects. The viewer displays a button when the catalog accepts its exact
+target. The host can disable buttons when supplies are unavailable.
+`effectButtons` can supply additional host-provided buttons below active
+effects. Each request carries the instance ID in `target.subject` when
+applicable. Call `reset` when the viewer switches to another organism.

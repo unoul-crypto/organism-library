@@ -42,8 +42,13 @@ struct RecordingCanvas final : Canvas {
         return std::any_of(labels.begin(),labels.end(),[label](const auto& item) { return item.first==label; });
     }
 
-    [[nodiscard]] Input click(std::string_view label) const {
-        const auto match=std::find_if(labels.begin(),labels.end(),[label](const auto& item) { return item.first==label; });
+    [[nodiscard]] Input click(std::string_view label,std::size_t occurrence=0) const {
+        const auto match=std::find_if(labels.begin(),labels.end(),[&](const auto& item) {
+            if (item.first!=label) return false;
+            if (occurrence==0) return true;
+            --occurrence;
+            return false;
+        });
         if (match==labels.end()) throw std::runtime_error("No visible control called "+std::string(label));
         const auto bounds=match->second;
         return {bounds.x+bounds.width/2,bounds.y+bounds.height/2,true,0};
@@ -89,7 +94,7 @@ void reviewPartAndEffects() {
     options.actions.partButtons.front().enabled=false;
     require(!draw(canvas.click("Inject analgesic")),"Disabled actions cannot be requested");
     const auto clearWing=draw(canvas.click("Clear strain"));
-    require(clearWing && clearWing->target==BodyActionTarget{"clear",wing} && clearWing->effectId=="shared",
+    require(clearWing && clearWing->target==BodyActionTarget{"clear",wing,std::string("shared")} && clearWing->effectId=="shared",
         "An effect button identifies the exact effect instance");
     require(!draw({90,230,true,0}) && viewer.selectedPart()==antenna && canvas.shows("Strain") &&
         !canvas.shows("Serious wound") && !canvas.shows("Inject analgesic"),
@@ -102,6 +107,37 @@ void reviewPartAndEffects() {
         "A second layer can use a list, with independent selection");
     require(!draw(canvas.click("Antenna")) && viewer.selectedPart()==antenna,"The fallback list accepts part clicks");
     require(!draw(canvas.click("Overview")) && !viewer.selectedPart(),"Return to organism-wide effects");
+}
+
+void instanceButtons() {
+    constexpr auto arm=injury::Part::Arm;
+    Organism patient;
+    require(patient.injuries.record(arm,injury::Severity::Serious) &&
+        patient.injuries.record(arm,injury::Severity::Mild) &&
+        patient.addEffect({"strain.arm","strain",arm,30,{}}),"Prepare two wounds and an effect on the same arm");
+    const BodyActionCatalog catalog({}, {bandageWoundAction()}, {
+        {"remove_strain",[](Organism& organism,const ActiveEffect& effect) {return organism.removeEffect(effect.id);},{}}
+    });
+    Options options;
+    options.layers={{"Anatomy",{}}};
+    options.actions.catalog=&catalog;
+    options.actions.instanceButtons={{bandageWoundActionId,"Bandage",true},{"remove_strain","Remove strain",true}};
+    OrganismViewer viewer;
+    RecordingCanvas canvas;
+    const auto draw=[&](Input input={}) {
+        canvas={};
+        return viewer.draw(canvas,viewport,input,patient,options);
+    };
+    require(!draw() && !draw(canvas.click("Arm")),"Select the arm from the anatomy list");
+    const auto answer=draw(canvas.click("Bandage",1));
+    require(answer && answer->target==BodyActionTarget{bandageWoundActionId,arm,patient.injuries.wounds()[1].id},
+        "The second wound card returns its own stable ID");
+    require(catalog.apply(patient,answer->target) && !draw() &&
+        canvas.shows("Bandage") && !patient.injuries.wounds()[0].treated && patient.injuries.wounds()[1].treated,
+        "The treated wound loses its button while the other wound remains untreated");
+    const auto effect=draw(canvas.click("Remove strain"));
+    require(effect && effect->target==BodyActionTarget{"remove_strain",arm,std::string("strain.arm")},
+        "An effect card returns the exact instance ID");
 }
 
 bool atRelativeBounds(Rect marker, Rect part, Rect expected) {
@@ -155,6 +191,7 @@ int main() {
     try {
         reviewPartAndEffects();
         effectMarkerGeometry();
+        instanceButtons();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;
